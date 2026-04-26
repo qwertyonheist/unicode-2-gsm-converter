@@ -835,7 +835,7 @@
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label"><span class="dot dot-accent"></span>Output (GSM-7)</span>
+        <span class="card-label" id="outputCardLabel"><span class="dot dot-accent"></span>Output (GSM-7)</span>
         <button class="icon-btn" id="copyOutputBtn" onclick="copyOutput()">
           <span class="material-icons">content_copy</span> Copy
         </button>
@@ -936,7 +936,7 @@
     <div class="stat-card">
       <div class="stat-label"><span class="material-icons">warning_amber</span>Non-GSM Found</div>
       <div class="stat-value warn" id="statNonGsm">0</div>
-      <div class="stat-sub">detected &amp; removed if emoji</div>
+      <div class="stat-sub" id="statNonGsmNote">in input</div>
     </div>
     <div class="stat-card">
       <div class="stat-label"><span class="material-icons">code</span>Encoding</div>
@@ -996,43 +996,67 @@ const GSM7_CHARS = new Set([
 const GSM7_EXT = new Set(['^','{','}','\\','[','~',']','|','€']);
 
 function isGsm(ch) { return GSM7_CHARS.has(ch) || GSM7_EXT.has(ch); }
-function charWeight(ch) { return GSM7_EXT.has(ch) ? 2 : 1; }
 
-// Emoji detection — covers emoji, pictographs, symbols, flags, ZWJ sequences
-const EMOJI_REGEX = /\p{Emoji}/u;
-function isEmoji(ch) {
-  // Exclude plain digit/# chars that technically have emoji property
-  const cp = ch.codePointAt(0);
-  if (cp >= 0x30 && cp <= 0x39) return false; // 0–9
-  if (cp === 0x23 || cp === 0x2A) return false; // # *
-  return EMOJI_REGEX.test(ch);
+// ── GSM-7 weight of a string (iterate by codepoint) ─────────────────────────
+// Extended-set chars cost 2 units; all others cost 1.
+function gsmWeight(str) {
+  let w = 0;
+  for (const ch of str) { // `for...of` iterates Unicode codepoints
+    w += GSM7_EXT.has(ch) ? 2 : 1;
+  }
+  return w;
 }
 
-// Common Unicode → GSM replacements (only applied in 'replace' mode)
+// ── Emoji detection ──────────────────────────────────────────────────────────
+// FIX #1: Use \p{Extended_Pictographic} instead of \p{Emoji}.
+// \p{Emoji} incorrectly matches © ® ™ 0-9 # * etc.
+// \p{Extended_Pictographic} covers true pictographic emoji but still includes
+// © ® ™ — so we explicitly exclude those (they go into the replacement map instead).
+const EMOJI_EXT_REGEX = /\p{Extended_Pictographic}/u;
+
+function isEmoji(ch) {
+  const cp = ch.codePointAt(0);
+  // Exclude ASCII range (handles 0-9, *, #, and all plain ASCII)
+  if (cp < 0x00A0) return false;
+  // Exclude typographic symbols that have Extended_Pictographic but aren't visual emoji
+  if (cp === 0x00A9 || cp === 0x00AE) return false; // © ®
+  if (cp === 0x2122 || cp === 0x2139) return false; // ™ ℹ
+  // Flag emoji are regional indicator pairs (U+1F1E6–U+1F1FF).
+  // These aren't Extended_Pictographic individually, so handle them explicitly.
+  if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true;
+  return EMOJI_EXT_REGEX.test(ch);
+}
+
+// Common Unicode → GSM replacements (applied in 'replace' mode for known chars)
+// FIX #7: Added © ® ™ entries so they map to text instead of being silently dropped.
 const REPLACEMENTS = [
-  { from: '\u2018', to: "'",  desc: 'Left single quote' },
-  { from: '\u2019', to: "'",  desc: 'Right single quote' },
-  { from: '\u201C', to: '"',  desc: 'Left double quote' },
-  { from: '\u201D', to: '"',  desc: 'Right double quote' },
-  { from: '\u2013', to: '-',  desc: 'En dash' },
-  { from: '\u2014', to: '-',  desc: 'Em dash' },
-  { from: '\u2026', to: '...', desc: 'Ellipsis' },
-  { from: '\u00A0', to: ' ',  desc: 'Non-breaking space' },
-  { from: '\u2022', to: '-',  desc: 'Bullet point' },
+  { from: '\u2018', to: "'",    desc: 'Left single quote' },
+  { from: '\u2019', to: "'",    desc: 'Right single quote' },
+  { from: '\u201C', to: '"',    desc: 'Left double quote' },
+  { from: '\u201D', to: '"',    desc: 'Right double quote' },
+  { from: '\u2013', to: '-',    desc: 'En dash' },
+  { from: '\u2014', to: '-',    desc: 'Em dash' },
+  { from: '\u2026', to: '...',  desc: 'Ellipsis' },
+  { from: '\u00A0', to: ' ',    desc: 'Non-breaking space' },
+  { from: '\u2022', to: '-',    desc: 'Bullet point' },
   { from: '\u20AC', to: '\u20AC', desc: 'Euro sign (GSM ext.)' },
-  { from: '\u00E1', to: 'a',  desc: 'á → a' },
-  { from: '\u00E2', to: 'a',  desc: 'â → a' },
-  { from: '\u00E3', to: 'a',  desc: 'ã → a' },
-  { from: '\u00E4', to: 'ä',  desc: 'ä (GSM native)' },
-  { from: '\u00E5', to: 'å',  desc: 'å (GSM native)' },
-  { from: '\u00E6', to: 'æ',  desc: 'æ (GSM native)' },
-  { from: '\u00E7', to: 'Ç',  desc: 'ç → Ç' },
-  { from: '\u00E9', to: 'é',  desc: 'é (GSM native)' },
-  { from: '\u00ED', to: 'i',  desc: 'í → i' },
-  { from: '\u00F3', to: 'o',  desc: 'ó → o' },
-  { from: '\u00FA', to: 'u',  desc: 'ú → u' },
-  { from: '\u00FC', to: 'ü',  desc: 'ü (GSM native)' },
-  { from: '\u00F1', to: 'ñ',  desc: 'ñ (GSM native)' },
+  { from: '\u00A9', to: '(c)',  desc: '© Copyright sign' },   // FIX #7
+  { from: '\u00AE', to: '(r)',  desc: '® Registered sign' },  // FIX #7
+  { from: '\u2122', to: 'TM',   desc: '™ Trade mark sign' },  // FIX #7
+  { from: '\u00B0', to: 'deg',  desc: '° Degree sign' },
+  { from: '\u00E1', to: 'a',    desc: 'á → a' },
+  { from: '\u00E2', to: 'a',    desc: 'â → a' },
+  { from: '\u00E3', to: 'a',    desc: 'ã → a' },
+  { from: '\u00E4', to: 'ä',    desc: 'ä (GSM native)' },
+  { from: '\u00E5', to: 'å',    desc: 'å (GSM native)' },
+  { from: '\u00E6', to: 'æ',    desc: 'æ (GSM native)' },
+  { from: '\u00E7', to: 'Ç',    desc: 'ç → Ç' },
+  { from: '\u00E9', to: 'é',    desc: 'é (GSM native)' },
+  { from: '\u00ED', to: 'i',    desc: 'í → i' },
+  { from: '\u00F3', to: 'o',    desc: 'ó → o' },
+  { from: '\u00FA', to: 'u',    desc: 'ú → u' },
+  { from: '\u00FC', to: 'ü',    desc: 'ü (GSM native)' },
+  { from: '\u00F1', to: 'ñ',    desc: 'ñ (GSM native)' },
 ];
 
 // Build replacement lookup map
@@ -1044,10 +1068,9 @@ let isDark = true;
 // ── Animated stat value update ────────────────────────────────────────────────
 function animateStat(id, newVal) {
   const el = document.getElementById(id);
-  if (el.textContent === String(newVal)) return; // no change, no flash
+  if (el.textContent === String(newVal)) return;
   el.classList.remove('animating');
-  // Force reflow to restart animation
-  void el.offsetWidth;
+  void el.offsetWidth; // force reflow
   el.textContent = newVal;
   el.classList.add('animating');
   el.addEventListener('animationend', () => el.classList.remove('animating'), { once: true });
@@ -1066,7 +1089,6 @@ function toggleTheme() {
   document.getElementById('toggleTrack').classList.toggle('on', isDark);
 }
 
-// Init toggle state
 document.getElementById('toggleTrack').classList.add('on');
 
 // ── Mode ─────────────────────────────────────────────────────────────────────
@@ -1084,65 +1106,67 @@ function convert() {
 
   if (!raw) { reset(); return; }
 
-  // Per-char classification
-  const charResults = []; // { ch, outputCh, isNonGsm, rep }
+  const charResults  = []; // { ch, outputCh, isNonGsm }
   const nonGsmFound  = new Map(); // ch → { count, code }
   const appliedReps  = new Set();
 
-  // Decompose raw into grapheme clusters (handles ZWJ emoji sequences, flags, etc.)
+  // Decompose into grapheme clusters (handles ZWJ emoji sequences, flags, etc.)
   const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-  const chars = [...segmenter.segment(raw)].map(s => s.segment);
+  const clusters  = [...segmenter.segment(raw)].map(s => s.segment);
 
-  for (const ch of chars) {
-    // Handle emojis based on mode
+  for (const ch of clusters) {
+    // ── Emoji: always remove in replace/strip; highlight in keep ──────────
     if (isEmoji(ch)) {
       trackNonGsm(nonGsmFound, ch);
       if (currentMode === 'keep') {
-        // In keep mode: show emoji highlighted as an issue
         charResults.push({ ch, outputCh: ch, isNonGsm: true });
-      } else {
-        // In replace/strip mode: remove emoji
-        charResults.push({ ch, outputCh: '', isNonGsm: false });
       }
+      // replace/strip: output nothing (emoji silently dropped)
       continue;
     }
 
+    // ── GSM-7 char: pass through in all modes ─────────────────────────────
     if (isGsm(ch)) {
-      // Already GSM — pass through in all modes
       charResults.push({ ch, outputCh: ch, isNonGsm: false });
       continue;
     }
 
-    // Non-GSM character
+    // ── Non-GSM, non-emoji (e.g. Devanagari/Nepali, Arabic, Latin ext.) ───
     trackNonGsm(nonGsmFound, ch);
-
     const rep = REPLACEMENT_MAP.get(ch);
 
     if (currentMode === 'replace') {
-      // Apply known replacement, else substitute '?'
-      const out = rep ? rep.to : '?';
-      if (rep) appliedReps.add(rep);
-      charResults.push({ ch, outputCh: out, isNonGsm: false });
+      if (rep) {
+        // Known replacement exists → apply it
+        appliedReps.add(rep);
+        charResults.push({ ch, outputCh: rep.to, isNonGsm: false });
+      } else {
+        // FIX #2: No GSM equivalent → keep as-is (Nepali, Arabic, etc.).
+        // The output encoding will correctly reflect Unicode/UCS-2.
+        // Previously this was replaced with '?' which destroyed the text.
+        charResults.push({ ch, outputCh: ch, isNonGsm: false });
+      }
     } else if (currentMode === 'strip') {
-      // Drop the character entirely
+      // Explicitly strip: user opted in, so drop the char
       charResults.push({ ch, outputCh: '', isNonGsm: false });
     } else {
-      // 'keep' — preserve as-is but mark for highlighting
+      // keep: preserve but flag for highlighting
       charResults.push({ ch, outputCh: ch, isNonGsm: true });
     }
   }
 
-  // Build plain output string
+  // ── Build output string ──────────────────────────────────────────────────
   const outputStr = charResults.map(r => r.outputCh).join('');
 
-  // Detect if output contains any non-GSM (relevant in 'keep' mode)
-  const hasUnicodeOutput = currentMode === 'keep' && nonGsmFound.size > 0;
+  // FIX #6: Detect unicode output by actually scanning output chars,
+  // not just checking keep-mode flag. Covers replace mode with Nepali kept as-is.
+  const hasUnicodeOutput = [...outputStr].some(ch => !isGsm(ch));
 
-  // Count weights
-  let totalWeight = 0;
-  for (const ch of outputStr) {
-    totalWeight += isGsm(ch) ? charWeight(ch) : 1;
-  }
+  // ── Calculate output SMS weight ──────────────────────────────────────────
+  // FIX #4: For Unicode encoding, use JS string .length (= UTF-16 code units = UCS-2).
+  // Chars above U+FFFF (many emoji) take 2 UCS-2 units, which .length correctly counts.
+  // For pure GSM-7, use gsmWeight() which handles the extended-set double-count.
+  const totalWeight = hasUnicodeOutput ? outputStr.length : gsmWeight(outputStr);
 
   const singleLimit = hasUnicodeOutput ? 70  : 160;
   const multiLimit  = hasUnicodeOutput ? 67  : 153;
@@ -1150,9 +1174,9 @@ function convert() {
     : totalWeight <= singleLimit ? 1
     : Math.ceil(totalWeight / multiLimit);
 
-  // ── Render output (with highlights in 'keep' mode) ──────────────────────
-  const outputEl = document.getElementById('outputArea');
-  const wasEmpty = outputEl.classList.contains('empty');
+  // ── Render output ────────────────────────────────────────────────────────
+  const outputEl  = document.getElementById('outputArea');
+  const wasEmpty  = outputEl.classList.contains('empty');
 
   if (currentMode === 'keep' && nonGsmFound.size > 0) {
     let html = '';
@@ -1172,60 +1196,75 @@ function convert() {
     if (!outputStr) outputEl.textContent = 'GSM output will appear here…';
   }
 
-  // Fade in only when transitioning from empty → has content
+  // Update output card label to reflect actual encoding
+  const outLabelEl = document.getElementById('outputCardLabel');
+  outLabelEl.innerHTML = hasUnicodeOutput
+    ? '<span class="dot dot-warn"></span>Output (Unicode)'
+    : '<span class="dot dot-accent"></span>Output (GSM-7)';
+
+  // Fade in on transition from empty → content
   if (wasEmpty && outputStr) {
     outputEl.removeAttribute('data-appearing');
-    void outputEl.offsetWidth; // force reflow to restart animation
+    void outputEl.offsetWidth;
     outputEl.setAttribute('data-appearing', '');
     outputEl.addEventListener('animationend', () => outputEl.removeAttribute('data-appearing'), { once: true });
   }
 
-  // ── SMS Comparison Panel ──────────────────────────────────────────────────
-  // Calculate INPUT stats (raw text, treat all non-GSM as unicode encoding)
-  const rawChars = [...segmenter.segment(raw)].map(s => s.segment);
-  const rawHasUnicode = rawChars.some(ch => !isGsm(ch));
-  let rawWeight = 0;
-  for (const ch of rawChars) {
-    // unicode encoding = every char costs 1 UCS-2 unit regardless
-    rawWeight += rawHasUnicode ? 1 : (isGsm(ch) ? charWeight(ch) : 1);
-  }
+  // ── INPUT side stats ─────────────────────────────────────────────────────
+  // FIX #3: Use raw.length (UTF-16 = UCS-2 code units) for Unicode-encoded input.
+  // Previously, grapheme cluster counting incorrectly counted ZWJ emoji as 1 unit.
+  const rawHasUnicode = clusters.some(ch => !isGsm(ch));
+  const rawWeight     = rawHasUnicode ? raw.length : gsmWeight(raw);
+
   const inSingleLimit = rawHasUnicode ? 70  : 160;
   const inMultiLimit  = rawHasUnicode ? 67  : 153;
   const inParts = rawWeight === 0 ? 0
     : rawWeight <= inSingleLimit ? 1
     : Math.ceil(rawWeight / inMultiLimit);
+
+  // FIX #5: Bar percentage and label corrected.
+  // Old code: rawWeight % inMultiLimit which gave wrong results for exactly 1 full part.
+  // New: for <=1 part use rawWeight directly; for multipart use chars in last part.
   const inBarPct = inParts <= 1
-    ? Math.min(100, Math.round((rawWeight / inSingleLimit) * 100))
+    ? Math.min(100, Math.round((rawWeight / (inSingleLimit || 1)) * 100))
     : Math.min(100, Math.round(((rawWeight % inMultiLimit || inMultiLimit) / inMultiLimit) * 100));
+  const inBarCharsUsed = inParts <= 1
+    ? rawWeight
+    : (rawWeight % inMultiLimit || inMultiLimit);
 
   animateStat('cmpInChars', rawWeight);
   animateStat('cmpInParts', inParts);
-  document.getElementById('cmpInPartsNote').textContent = rawHasUnicode ? `Unicode (${inSingleLimit}/SMS)` : `GSM-7 (${inSingleLimit}/SMS)`;
-  document.getElementById('cmpInEnc').innerHTML       = rawHasUnicode
+  document.getElementById('cmpInPartsNote').textContent  = rawHasUnicode ? `Unicode (${inSingleLimit}/SMS)` : `GSM-7 (${inSingleLimit}/SMS)`;
+  document.getElementById('cmpInEnc').innerHTML          = rawHasUnicode
     ? '<span class="enc-badge unicode">Unicode</span>'
     : '<span class="enc-badge gsm7">GSM-7</span>';
-  document.getElementById('cmpInEncLabel').textContent = rawHasUnicode ? 'UCS-2 / UTF-16' : '7-bit encoding';
-  document.getElementById('cmpInEncNote').textContent = rawHasUnicode ? 'UCS-2 / UTF-16' : '7-bit encoding';
-  document.getElementById('cmpInBar').style.width     = inBarPct + '%';
-  document.getElementById('cmpInBarLabel').textContent = `${rawWeight % inMultiLimit || (inParts > 0 ? inMultiLimit : 0)} / ${inParts > 1 ? inMultiLimit : inSingleLimit} chars`;
+  document.getElementById('cmpInEncLabel').textContent   = rawHasUnicode ? 'UCS-2 / UTF-16' : '7-bit encoding';
+  document.getElementById('cmpInEncNote').textContent    = rawHasUnicode ? 'UCS-2 / UTF-16' : '7-bit encoding';
+  document.getElementById('cmpInBar').style.width        = inBarPct + '%';
+  document.getElementById('cmpInBarLabel').textContent   = `${inBarCharsUsed} / ${inParts > 1 ? inMultiLimit : inSingleLimit} chars`;
 
-  // OUTPUT stats
+  // ── OUTPUT side stats ────────────────────────────────────────────────────
   const outSingleLimit = hasUnicodeOutput ? 70  : 160;
   const outMultiLimit  = hasUnicodeOutput ? 67  : 153;
+
+  // FIX #5: Same bar-label fix for output side.
   const outBarPct = parts <= 1
-    ? Math.min(100, Math.round((totalWeight / outSingleLimit) * 100))
+    ? Math.min(100, Math.round((totalWeight / (outSingleLimit || 1)) * 100))
     : Math.min(100, Math.round(((totalWeight % outMultiLimit || outMultiLimit) / outMultiLimit) * 100));
+  const outBarCharsUsed = parts <= 1
+    ? totalWeight
+    : (totalWeight % outMultiLimit || outMultiLimit);
 
   animateStat('cmpOutChars', totalWeight);
   animateStat('cmpOutParts', parts);
   document.getElementById('cmpOutPartsNote').textContent = hasUnicodeOutput ? `Unicode (${outSingleLimit}/SMS)` : `GSM-7 (${outSingleLimit}/SMS)`;
-  document.getElementById('cmpOutEnc').innerHTML       = hasUnicodeOutput
+  document.getElementById('cmpOutEnc').innerHTML         = hasUnicodeOutput
     ? '<span class="enc-badge unicode">Unicode</span>'
     : '<span class="enc-badge gsm7">GSM-7</span>';
-  document.getElementById('cmpOutEncLabel').textContent = hasUnicodeOutput ? 'UCS-2 / UTF-16' : '7-bit encoding';
-  document.getElementById('cmpOutEncNote').textContent = hasUnicodeOutput ? 'UCS-2 / UTF-16' : '7-bit encoding';
-  document.getElementById('cmpOutBar').style.width     = outBarPct + '%';
-  document.getElementById('cmpOutBarLabel').textContent = `${totalWeight % outMultiLimit || (parts > 0 ? outMultiLimit : 0)} / ${parts > 1 ? outMultiLimit : outSingleLimit} chars`;
+  document.getElementById('cmpOutEncLabel').textContent  = hasUnicodeOutput ? 'UCS-2 / UTF-16' : '7-bit encoding';
+  document.getElementById('cmpOutEncNote').textContent   = hasUnicodeOutput ? 'UCS-2 / UTF-16' : '7-bit encoding';
+  document.getElementById('cmpOutBar').style.width       = outBarPct + '%';
+  document.getElementById('cmpOutBarLabel').textContent  = `${outBarCharsUsed} / ${parts > 1 ? outMultiLimit : outSingleLimit} chars`;
 
   // Savings badge
   const savingsEl = document.getElementById('savingsRow');
@@ -1248,22 +1287,25 @@ function convert() {
     savingsEl.innerHTML = `<span class="material-icons">drag_handle</span> No difference`;
   }
 
-
+  // ── Bottom stats bar ─────────────────────────────────────────────────────
   animateStat('statChars', totalWeight);
   animateStat('statParts', parts);
   document.getElementById('statPartsNote').textContent = hasUnicodeOutput
     ? `Unicode (${singleLimit} chars/SMS)`
     : `GSM-7 (${singleLimit} chars/SMS)`;
   animateStat('statNonGsm', nonGsmFound.size);
+  document.getElementById('statNonGsmNote').textContent = nonGsmFound.size > 0
+    ? (currentMode === 'replace' ? 'replaced / kept as Unicode' : currentMode === 'strip' ? 'stripped from output' : 'highlighted in output')
+    : 'in input';
 
   const encEl   = document.getElementById('statEncoding');
   const encNote = document.getElementById('statEncodingNote');
   if (hasUnicodeOutput) {
-    encEl.innerHTML = '<span class="enc-badge unicode">Unicode</span>';
-    encNote.textContent = 'UCS-2 / UTF-16';
+    encEl.innerHTML       = '<span class="enc-badge unicode">Unicode</span>';
+    encNote.textContent   = 'UCS-2 / UTF-16';
   } else {
-    encEl.innerHTML = '<span class="enc-badge gsm7">GSM-7</span>';
-    encNote.textContent = '7-bit encoding';
+    encEl.innerHTML       = '<span class="enc-badge gsm7">GSM-7</span>';
+    encNote.textContent   = '7-bit encoding';
   }
 
   // ── Non-GSM list ──────────────────────────────────────────────────────────
@@ -1308,9 +1350,10 @@ function convert() {
   }
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
 function trackNonGsm(map, ch) {
   // For multi-codepoint sequences (ZWJ emoji, flags), show first codepoint + indicator
-  const cps = [...ch].map(c => c.codePointAt(0).toString(16).toUpperCase().padStart(4,'0'));
+  const cps  = [...ch].map(c => c.codePointAt(0).toString(16).toUpperCase().padStart(4,'0'));
   const code = cps.length > 1 ? cps[0] + '+' : cps[0];
   if (map.has(ch)) { map.get(ch).count++; }
   else { map.set(ch, { count: 1, code }); }
@@ -1324,20 +1367,24 @@ function reset() {
   const outEl = document.getElementById('outputArea');
   outEl.className = 'output-area empty';
   outEl.textContent = 'GSM output will appear here…';
-  document.getElementById('statChars').textContent = '0';
-  document.getElementById('statParts').textContent = '0';
-  document.getElementById('statPartsNote').textContent = 'GSM-7 (160 chars/SMS)';
-  document.getElementById('statNonGsm').textContent = '0';
-  document.getElementById('statEncoding').innerHTML = '—';
+
+  // Reset output card label
+  document.getElementById('outputCardLabel').innerHTML = '<span class="dot dot-accent"></span>Output (GSM-7)';
+
+  ['statChars','statParts','statNonGsm'].forEach(id => document.getElementById(id).textContent = '0');
+  document.getElementById('statPartsNote').textContent   = 'GSM-7 (160 chars/SMS)';
+  document.getElementById('statNonGsmNote').textContent  = 'in input';
+  document.getElementById('statEncoding').innerHTML      = '—';
   document.getElementById('statEncodingNote').textContent = '—';
-  document.getElementById('nonGsmList').innerHTML = '<span class="empty-notice"><span class="material-icons">check_circle</span>All characters are GSM-7 compatible</span>';
-  document.getElementById('replacementTable').innerHTML = `<tr><td colspan="4" style="color:var(--text-disabled);text-align:center;padding:20px;font-family:'Roboto',sans-serif;font-size:15px">No replacements applied</td></tr>`;
-  // Reset comparison panel
+  document.getElementById('nonGsmList').innerHTML        = '<span class="empty-notice"><span class="material-icons">check_circle</span>All characters are GSM-7 compatible</span>';
+  document.getElementById('replacementTable').innerHTML  = `<tr><td colspan="4" style="color:var(--text-disabled);text-align:center;padding:20px;font-family:'Roboto',sans-serif;font-size:15px">No replacements applied</td></tr>`;
+
   ['cmpInChars','cmpInParts','cmpOutChars','cmpOutParts'].forEach(id => document.getElementById(id).textContent = '0');
   ['cmpInPartsNote','cmpOutPartsNote','cmpInEncLabel','cmpOutEncLabel','cmpInEncNote','cmpOutEncNote'].forEach(id => document.getElementById(id).textContent = '—');
   ['cmpInEnc','cmpOutEnc'].forEach(id => document.getElementById(id).innerHTML = '—');
   ['cmpInBar','cmpOutBar'].forEach(id => document.getElementById(id).style.width = '0%');
   ['cmpInBarLabel','cmpOutBarLabel'].forEach(id => document.getElementById(id).textContent = '0 / 0 chars');
+
   const savingsEl = document.getElementById('savingsRow');
   savingsEl.className = 'savings-row';
   savingsEl.innerHTML = '<span class="material-icons">horizontal_rule</span> Type a message to compare';
@@ -1353,6 +1400,7 @@ function clearInput() {
 function copyOutput() {
   const outputEl = document.getElementById('outputArea');
   if (outputEl.classList.contains('empty')) return;
+  // Use textContent to get plain text even in 'keep' mode (strips highlight spans)
   const txt = outputEl.textContent;
   navigator.clipboard.writeText(txt).then(() => {
     const btn = document.getElementById('copyOutputBtn');
